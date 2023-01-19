@@ -12,6 +12,9 @@ using LinearAlgebra.BLAS: gemv!, scal!, axpy!, copy!
 using SparseMatrix: spdiag, spger!
 using NMarkov: itime, @dot, rightbound, poipmf!, unif
 
+using Distributions
+using Random
+
 eye(T::Type, m, n) = Matrix{T}(I, m, n)
 
 """
@@ -527,4 +530,110 @@ function emest!(m, env, data, t00, t11; maxiter=1000, atol=1.0e-3, verbose=true,
         prev = llf
     end
     (params=env, llf=llf, conv=conv, iter=iter, aerror=aerror, rerror=rerror)
+end
+
+"""
+simulation
+"""
+
+function sim(rng, model, env, t)
+    Q = seval(model.Q, env)
+    initv = seval(model.initv, env)
+    rwd = Dict([k=>seval(v, env) for (k,v) = model.reward])
+    
+    P, qv = NMarkov.unif(Q)
+    expdist = Exponential(qv)
+
+    state = findnext(rand(rng, Multinomial(1, initv)).==1, 1)
+    simtime = 0.0
+    time = [simtime]
+    itime = Float64[]
+    states = [state]
+    rewards = Dict{Symbol,Vector{Float64}}()
+    for (k,v) = rwd
+        rewards[k] = [v[state]]
+    end
+    while simtime < t
+        v = P[state,:]
+        state = v.nzind[rand(rng, Multinomial(1, v.nzval)).==1][1]
+        tint = rand(rng, expdist)
+        simtime += tint
+        push!(states, state)
+        push!(itime, tint)
+        push!(time, simtime)
+        for (k,v) = rwd
+            push!(rewards[k], v[state])
+        end
+    end
+    (time=time, itime=itime, states=states, rewards=rewards)
+end
+
+
+function nexttime!(t0, alts, i)
+    while true
+        if i >= length(alts)
+            return nothing
+        end
+        if t0 < alts[i]
+            alts[i] -= t0
+            return i
+        else
+            t0 -= alts[i]
+            i += 1
+        end
+    end
+end
+
+function getbusytime!(t0, alts, r, i)
+    result = 0.0
+    while true
+        if i >= length(alts)
+            return nothing, 0.0
+        end
+        if t0 < alts[i]
+            alts[i] -= t0
+            if r[i] == 1.0
+                result += t0
+            end
+            return i, result
+        else
+            t0 -= alts[i]
+            if r[i] == 1.0
+                result += alts[i]
+            end
+        end
+    end
+end
+
+function get_utilization(tu, to, results)
+    ## reduction (only extract the points at which the reward changes)
+    prev = results.rewards[:busy][1]
+    rr = [prev]
+    tt = [results.time[1]]
+    for i = 2:length(results.time)
+        if results.rewards[:busy][i] != prev
+            prev = results.rewards[:busy][i]
+            push!(tt, results.time[i])
+            push!(rr, prev)
+        end
+    end
+    tt = diff(tt)
+    rr = rr[1:end-1]
+
+    ## compute utilization
+    i = 1
+    udat = Float64[]
+    while true
+        i = nexttime!(tu, tt, i)
+        if i == nothing
+            break
+        end
+        i, u = getbusytime!(to, tt, rr, i)
+        if i == nothing
+            break
+        end
+        push!(udat, u/to)
+    end
+    
+    udat
 end
